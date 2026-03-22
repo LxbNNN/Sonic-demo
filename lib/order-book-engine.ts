@@ -2,9 +2,10 @@
  * OrderBookManager — 订单簿核心引擎（单例）
  *
  * 关键原则：
- * - 快照为权威基准（replace）
+ * - 增量驱动剪枝：每条 delta 的价格隐含地标定当前市场范围，
+ *   对侧超出该范围的条目即为陈旧，实时删除，无需快照补偿
+ * - 快照仅用于初始加载/重连/大 seq 缺口，正常运行期间不依赖快照
  * - 序列连续性由 MarketService 严格校验后再写入引擎
- * - 引擎仅负责：数据存储、聚合输出、冻结 watchdog 与诊断事件
  */
 
 import type {
@@ -183,6 +184,12 @@ export class OrderBookManager {
   /**
    * 在 MarketService 完成序列校验后应用增量。
    * 返回 false 表示重复或过期序列（不会写入）。
+   *
+   * 关键机制——delta 驱动剪枝：
+   * 每条 delta 携带的价格隐式标定当前市场范围。
+   * 例如收到 ask delta 最低价 68,650，则 bidMap 中 > 68,650 的条目
+   * 在真实市场中已被撮合消化，属于陈旧数据，立即删除。
+   * 效果等同于服务端发送 size=0，但完全在客户端完成，不影响业务数据。
    */
   applyDelta(delta: WsBookDeltaMessage): boolean {
     if (this.lastSeq >= 0 && delta.seq <= this.lastSeq) {
@@ -190,13 +197,25 @@ export class OrderBookManager {
     }
 
     const now = Date.now();
+    let highestNewBid = -1;
+    let lowestNewAsk = Infinity;
+
     if (Array.isArray(delta.bids) && delta.bids.length > 0) {
       applyLevels(this.bidMap, delta.bids as unknown[]);
       this.lastBidDeltaAt = now;
+      highestNewBid = maxActivePrice(delta.bids as unknown[]);
     }
     if (Array.isArray(delta.asks) && delta.asks.length > 0) {
       applyLevels(this.askMap, delta.asks as unknown[]);
       this.lastAskDeltaAt = now;
+      lowestNewAsk = minActivePrice(delta.asks as unknown[]);
+    }
+
+    if (lowestNewAsk < Infinity) {
+      pruneAbove(this.bidMap, lowestNewAsk);
+    }
+    if (highestNewBid > 0) {
+      pruneBelow(this.askMap, highestNewBid);
     }
 
     this.lastSeq = delta.seq;
@@ -265,8 +284,15 @@ export class OrderBookManager {
     trimMap(this.bidMap, MAX_MAP_ENTRIES, "desc");
     trimMap(this.askMap, MAX_MAP_ENTRIES, "asc");
 
-    const bids = groupSortSlice(this.bidMap, "desc", this.depth, this.tickSize);
-    const asks = groupSortSlice(this.askMap, "asc", this.depth, this.tickSize);
+    let bids = groupSortSlice(this.bidMap, "desc", this.depth, this.tickSize);
+    let asks = groupSortSlice(this.askMap, "asc", this.depth, this.tickSize);
+
+    if (bids.length > 0 && asks.length > 0 && bids[0].price >= asks[0].price) {
+      this.pruneCrossedEntries(bids, asks);
+      bids = groupSortSlice(this.bidMap, "desc", this.depth, this.tickSize);
+      asks = groupSortSlice(this.askMap, "asc", this.depth, this.tickSize);
+    }
+
     if (levelsEqual(bids, this.prevBids) && levelsEqual(asks, this.prevAsks)) {
       return;
     }
@@ -275,6 +301,29 @@ export class OrderBookManager {
     this.prevAsks = asks;
     this.lastUiFlushAt = now;
     this.onFlush(bids, asks);
+  }
+
+  /**
+   * 倒挂簿修复：根据两侧最近 delta 时间戳判定哪侧陈旧，
+   * 从 map 中删除明显越界的条目（bid ≥ bestAsk 或 ask ≤ bestBid）。
+   */
+  private pruneCrossedEntries(
+    bids: PriceLevel[],
+    asks: PriceLevel[],
+  ) {
+    if (bids.length === 0 || asks.length === 0) return;
+
+    if (this.lastAskDeltaAt >= this.lastBidDeltaAt) {
+      const bestAsk = asks[0].price;
+      for (const [key, entry] of this.bidMap) {
+        if (entry.price >= bestAsk) this.bidMap.delete(key);
+      }
+    } else {
+      const bestBid = bids[0].price;
+      for (const [key, entry] of this.askMap) {
+        if (entry.price <= bestBid) this.askMap.delete(key);
+      }
+    }
   }
 
   private stopTimer() {
@@ -369,6 +418,40 @@ function snapToTick(
   const fn = side === "bid" ? Math.floor : Math.ceil;
   const grouped = fn(scaled / scaledTick) * scaledTick;
   return grouped / factor;
+}
+
+/** delta 中有效（size>0）条目的最高价 */
+function maxActivePrice(levels: unknown[]): number {
+  let max = -1;
+  for (const raw of levels) {
+    const entry = parseLevel(raw);
+    if (entry && entry.size > 0 && entry.price > max) max = entry.price;
+  }
+  return max;
+}
+
+/** delta 中有效（size>0）条目的最低价 */
+function minActivePrice(levels: unknown[]): number {
+  let min = Infinity;
+  for (const raw of levels) {
+    const entry = parseLevel(raw);
+    if (entry && entry.size > 0 && entry.price < min) min = entry.price;
+  }
+  return min;
+}
+
+/** 删除 map 中价格严格高于 threshold 的条目 */
+function pruneAbove(map: Map<string, BookEntry>, threshold: number) {
+  for (const [key, entry] of map) {
+    if (entry.price > threshold) map.delete(key);
+  }
+}
+
+/** 删除 map 中价格严格低于 threshold 的条目 */
+function pruneBelow(map: Map<string, BookEntry>, threshold: number) {
+  for (const [key, entry] of map) {
+    if (entry.price < threshold) map.delete(key);
+  }
 }
 
 function trimMap(

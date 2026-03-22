@@ -3,9 +3,11 @@
  *
  * 设计原则（对齐 Binance/OKX 最佳实践）：
  * 1. 增量始终应用——不因同步状态阻塞 delta，避免任何冻结场景
- * 2. 快照为修正手段——成功时全量替换，失败时持续重试不影响增量流
- * 3. 容忍小 seq gap——仅大缺口触发快照修正，小缺口直接容忍
- * 4. 零死角兜底——健康检测覆盖 WS 静默死亡 + 同步超时卡死
+ * 2. delta 驱动剪枝——引擎根据 delta 价格实时清理对侧陈旧条目，
+ *    无需依赖频繁快照补偿，消除 20→10→20 抖动
+ * 3. 快照仅限必要场景——初始加载、WS 重连、大 seq 缺口
+ * 4. 容忍小 seq gap——仅大缺口触发快照修正，小缺口直接容忍
+ * 5. 零死角兜底——健康检测覆盖 WS 静默死亡 + 同步超时卡死
  */
 
 import { WebSocketManager } from "./websocket-manager";
@@ -249,7 +251,7 @@ export class MarketService {
 
   /**
    * 节流的快照请求入口——合并高频请求，防止风暴。
-   * 无论成功失败都保证有后续重试路径（见 scheduleSnapshotRetry）。
+   * 仅在 seq 大缺口/WS 重连/watchdog 等必要场景触发。
    */
   private ensureSnapshotFetch(reason: string) {
     const now = Date.now();
@@ -315,12 +317,11 @@ export class MarketService {
   }
 
   /**
-   * 快照失败后的退避重试——始终调度，确保永不死锁。
-   * 这是修复旧版 scheduleNextSnapshot 死锁的关键：
-   * 旧版在 snapshotLoaded=true 时直接 return，导致 resync 失败后无人重试。
+   * 快照失败后的退避重试——仅在失败时调度，成功后不再定期拉取。
+   * 正常运行期间的陈旧条目由 delta 驱动剪枝处理，无需周期性快照。
    */
   private scheduleSnapshotRetry() {
-    this.cancelSnapshotRetry();
+    this.cancelScheduledFetch();
     const delay = Math.min(
       2_000 * Math.pow(2, this.retryAttempt),
       SNAPSHOT_RETRY_MAX_MS,
@@ -333,7 +334,7 @@ export class MarketService {
     }, delay);
   }
 
-  private cancelSnapshotRetry() {
+  private cancelScheduledFetch() {
     if (this.snapshotTimer !== null) {
       clearTimeout(this.snapshotTimer);
       this.snapshotTimer = null;
@@ -439,7 +440,7 @@ export class MarketService {
     this.obManager.stop();
     this.obManager.reset();
     this.stopRateCounter();
-    this.cancelSnapshotRetry();
+    this.cancelScheduledFetch();
     this.stopTradeFlush();
     this.stopHealthCheck();
     this.retryAttempt = 0;
