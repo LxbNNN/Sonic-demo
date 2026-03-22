@@ -1,0 +1,61 @@
+{
+  "header": {
+    "brand": "Sonic Perps"
+  },
+  "market": {
+    "spread": "Spread",
+    "trades": "Trades"
+  },
+  "orderBook": {
+    "title": "Order Book",
+    "price": "Price",
+    "size": "Size",
+    "total": "Total"
+  },
+  "chart": {
+    "title": "Chart"
+  },
+  "orderEntry": {
+    "limit": "Limit",
+    "market": "Market",
+    "buyLong": "Buy / Long",
+    "sellShort": "Sell / Short",
+    "price": "Price",
+    "amount": "Amount",
+    "submitting": "Submitting...",
+    "buy": "Buy",
+    "sell": "Sell",
+    "accepted": "Accepted: {orderId}",
+    "failed": "Failed"
+  },
+  "tradeTape": {
+    "title": "Recent Trades",
+    "price": "Price",
+    "size": "Size",
+    "time": "Time",
+    "aggregated": "Agg"
+  },
+  "txFeed": {
+    "title": "Solana Transactions",
+    "signature": "Signature",
+    "slot": "Slot",
+    "fee": "Fee",
+    "programs": "Programs",
+    "waiting": "Waiting for transactions…"
+  },
+  "connection": {
+    "live": "Live",
+    "connecting": "Connecting",
+    "reconnecting": "Reconnecting",
+    "offline": "Offline",
+    "bookSyncing": "Book syncing",
+    "bookResyncing": "Book resyncing"
+  },
+  "messageRate": {
+    "unit": "msg/s"
+  },
+  "locale": {
+    "en": "English",
+    "zh": "中文"
+  }
+}

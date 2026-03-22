@@ -1,0 +1,61 @@
+{
+  "header": {
+    "brand": "Sonic 永续合约"
+  },
+  "market": {
+    "spread": "价差",
+    "trades": "成交"
+  },
+  "orderBook": {
+    "title": "订单簿",
+    "price": "价格",
+    "size": "数量",
+    "total": "合计"
+  },
+  "chart": {
+    "title": "K线图"
+  },
+  "orderEntry": {
+    "limit": "限价",
+    "market": "市价",
+    "buyLong": "买入 / 做多",
+    "sellShort": "卖出 / 做空",
+    "price": "价格",
+    "amount": "数量",
+    "submitting": "提交中...",
+    "buy": "买入",
+    "sell": "卖出",
+    "accepted": "已接受: {orderId}",
+    "failed": "提交失败"
+  },
+  "tradeTape": {
+    "title": "最新成交",
+    "price": "价格",
+    "size": "数量",
+    "time": "时间",
+    "aggregated": "聚合"
+  },
+  "txFeed": {
+    "title": "Solana 交易流",
+    "signature": "交易签名",
+    "slot": "Slot",
+    "fee": "手续费",
+    "programs": "程序",
+    "waiting": "等待交易数据…"
+  },
+  "connection": {
+    "live": "已连接",
+    "connecting": "连接中",
+    "reconnecting": "重连中",
+    "offline": "已断开",
+    "bookSyncing": "订单簿同步中",
+    "bookResyncing": "订单簿重同步"
+  },
+  "messageRate": {
+    "unit": "条/秒"
+  },
+  "locale": {
+    "en": "English",
+    "zh": "中文"
+  }
+}
