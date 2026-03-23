@@ -73,6 +73,7 @@ export class WebSocketManager {
           this.clearPongTimeout();
           return;
         }
+
         this.lastMessageAt = Date.now();
         this.onMessage(data);
       } catch (e) {

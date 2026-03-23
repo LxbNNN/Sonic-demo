@@ -57,6 +57,15 @@ const SILENT_DEATH_MS = 30_000;
 /** 非 live 状态持续超过此时间，强制进入 live（降级模式） */
 const SYNC_TIMEOUT_MS = 15_000;
 
+/** 全局无 delta 超过此时间判定为数据陈旧（ms） */
+const STALE_DATA_MS = 8_000;
+
+/** 单侧无 delta 超过此时间判定为单侧停滞（ms） */
+const SIDE_STALE_MS = 5_000;
+
+/** 另一侧在此时间内活跃时，才触发单侧停滞检测（ms） */
+const SIDE_ACTIVE_MS = 2_000;
+
 /** seq gap 小于此阈值时直接容忍（不触发快照修正） */
 const SEQ_GAP_TOLERANCE = 20;
 
@@ -362,12 +371,13 @@ export class MarketService {
 
   private checkHealth = () => {
     if (!this.ws || !this.currentMarketId) return;
+    const now = Date.now();
 
     // 1. WebSocket 静默死亡检测
     const lastMsg = this.ws.getLastMessageAt();
     if (
       lastMsg > 0 &&
-      Date.now() - lastMsg > SILENT_DEATH_MS &&
+      now - lastMsg > SILENT_DEATH_MS &&
       this.ws.isOpen()
     ) {
       console.warn("[MarketService] silent connection detected, reconnecting");
@@ -386,6 +396,44 @@ export class MarketService {
         );
         this.setOrderBookSyncState("live");
         this.fetchSnapshot(true);
+        return;
+      }
+    }
+
+    // 3. 订单簿数据陈旧检测（从引擎 flush 中移入）
+    const diag = this.obManager.getDiagnostics();
+
+    if (diag.lastDeltaAt > 0) {
+      const deltaAge = now - diag.lastDeltaAt;
+      if (deltaAge > STALE_DATA_MS) {
+        marketBus.emit("orderbook_stall_detected", {
+          kind: "global_stale",
+          bidAgeMs: diag.lastBidDeltaAt > 0 ? now - diag.lastBidDeltaAt : 0,
+          askAgeMs: diag.lastAskDeltaAt > 0 ? now - diag.lastAskDeltaAt : 0,
+          deltaAgeMs: deltaAge,
+          at: now,
+        });
+        this.ensureSnapshotFetch("global_stale");
+        return;
+      }
+    }
+
+    // 4. 单侧停滞检测——一侧活跃但另一侧长时间无更新
+    if (diag.lastBidDeltaAt > 0 && diag.lastAskDeltaAt > 0) {
+      const bidAge = now - diag.lastBidDeltaAt;
+      const askAge = now - diag.lastAskDeltaAt;
+      if (
+        (bidAge < SIDE_ACTIVE_MS && askAge > SIDE_STALE_MS) ||
+        (askAge < SIDE_ACTIVE_MS && bidAge > SIDE_STALE_MS)
+      ) {
+        marketBus.emit("orderbook_stall_detected", {
+          kind: "side_imbalance",
+          bidAgeMs: bidAge,
+          askAgeMs: askAge,
+          deltaAgeMs: diag.lastDeltaAt > 0 ? now - diag.lastDeltaAt : 0,
+          at: now,
+        });
+        this.ensureSnapshotFetch("side_imbalance");
       }
     }
   };
