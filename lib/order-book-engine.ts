@@ -33,45 +33,6 @@ export interface OrderBookDiagnostics {
 const MAX_MAP_ENTRIES = 2000;
 const REF_ALPHA = 0.03;
 
-// ======================== DEBUG CONFIG ========================
-const DBG_ENABLED = true;
-const DBG_REPORT_MS = 3_000;
-
-interface DbgCounters {
-  deltaCount: number;
-  dupDeltaCount: number;
-  bidZero: number;
-  askZero: number;
-  bidUpsert: number;
-  askUpsert: number;
-  flushCount: number;
-  flushCallbackCount: number;
-  flushSkipEqualCount: number;
-  flushSkipCleanCount: number;
-  lastReportAt: number;
-  prevBidRows: number;
-  prevAskRows: number;
-}
-
-function makeDbgCounters(): DbgCounters {
-  return {
-    deltaCount: 0,
-    dupDeltaCount: 0,
-    bidZero: 0,
-    askZero: 0,
-    bidUpsert: 0,
-    askUpsert: 0,
-    flushCount: 0,
-    flushCallbackCount: 0,
-    flushSkipEqualCount: 0,
-    flushSkipCleanCount: 0,
-    lastReportAt: performance.now(),
-    prevBidRows: -1,
-    prevAskRows: -1,
-  };
-}
-// ==============================================================
-
 export class OrderBookManager {
   private static instance: OrderBookManager | null = null;
 
@@ -108,11 +69,9 @@ export class OrderBookManager {
   /** EMA 参考价，用于分区 bid/ask 显示 */
   private refPrice = 0;
 
-  // ---- DEBUG ----
-  private _d: DbgCounters = makeDbgCounters();
-
   private constructor() {}
 
+  /** 配置引擎参数（链式调用） */
   configure(depth: number, flushIntervalMs?: number, tickSize?: number): this {
     this.depth = depth;
     if (flushIntervalMs !== undefined) this.flushIntervalMs = flushIntervalMs;
@@ -120,6 +79,7 @@ export class OrderBookManager {
     return this;
   }
 
+  /** 绑定 flush 回调：引擎每次输出新快照时调用 */
   bindFlush(
     onFlush: (bids: PriceLevel[], asks: PriceLevel[]) => void,
   ): this {
@@ -127,16 +87,11 @@ export class OrderBookManager {
     return this;
   }
 
+  /** 启动 rAF 循环，按 flushIntervalMs 节流调用 flush */
   start(): this {
     this.stopTimer();
-    this._d = makeDbgCounters();
     const loop = () => {
       const now = performance.now();
-
-      if (DBG_ENABLED && now - this._d.lastReportAt >= DBG_REPORT_MS) {
-        this.dbgReport(now);
-      }
-
       if (now - this.lastFlushTime >= this.flushIntervalMs) {
         this.lastFlushTime = now;
         this.flush();
@@ -147,11 +102,13 @@ export class OrderBookManager {
     return this;
   }
 
+  /** 停止 flush 循环 */
   stop(): this {
     this.stopTimer();
     return this;
   }
 
+  /** 重置所有状态（切换市场时调用） */
   reset(): this {
     this.bidSide.clear();
     this.askSide.clear();
@@ -169,6 +126,7 @@ export class OrderBookManager {
     return this;
   }
 
+  /** 修改聚合粒度（清空缓存、标记脏位以触发重新 flush） */
   setTickSize(tick: number): this {
     if (tick > 0 && tick !== this.tickSize) {
       this.tickSize = tick;
@@ -187,6 +145,7 @@ export class OrderBookManager {
     return this.lastSeq;
   }
 
+  /** 清除序列号锚点（重连/快照后需重新校准） */
   clearLastSeq(): this {
     this.lastSeq = -1;
     return this;
@@ -196,6 +155,7 @@ export class OrderBookManager {
     return this.syncState;
   }
 
+  /** 更新同步状态并通过事件总线广播 */
   setSyncState(state: OrderBookSyncState, reason?: string): this {
     if (this.syncState === state) return this;
     this.syncState = state;
@@ -214,6 +174,7 @@ export class OrderBookManager {
     return this;
   }
 
+  /** 全量快照替换（清空旧数据 → 写入新数据 → 重置参考价） */
   replaceSnapshot(
     rawBids: unknown[],
     rawAsks: unknown[],
@@ -239,29 +200,10 @@ export class OrderBookManager {
    */
   applyDelta(delta: WsBookDeltaMessage): boolean {
     if (this.lastSeq >= 0 && delta.seq <= this.lastSeq) {
-      if (DBG_ENABLED) this._d.dupDeltaCount++;
       return false;
     }
 
     const now = Date.now();
-
-    if (DBG_ENABLED) {
-      this._d.deltaCount++;
-      if (Array.isArray(delta.bids)) {
-        for (const raw of delta.bids) {
-          const s = extractSize(raw);
-          if (s === 0) this._d.bidZero++;
-          else if (s > 0) this._d.bidUpsert++;
-        }
-      }
-      if (Array.isArray(delta.asks)) {
-        for (const raw of delta.asks) {
-          const s = extractSize(raw);
-          if (s === 0) this._d.askZero++;
-          else if (s > 0) this._d.askUpsert++;
-        }
-      }
-    }
 
     if (Array.isArray(delta.bids) && delta.bids.length > 0) {
       this.bidSide.applyLevels(delta.bids as unknown[]);
@@ -272,7 +214,6 @@ export class OrderBookManager {
       this.lastAskDeltaAt = now;
     }
 
-    // 更新 EMA 参考价
     this.updateRefPrice(delta);
 
     this.lastSeq = delta.seq;
@@ -282,6 +223,7 @@ export class OrderBookManager {
     return true;
   }
 
+  /** 从增量中提取最优买/卖价，更新 EMA 参考价 */
   private updateRefPrice(delta: WsBookDeltaMessage): void {
     let deltaBid = -1;
     let deltaAsk = Infinity;
@@ -309,6 +251,7 @@ export class OrderBookManager {
     }
   }
 
+  /** 返回引擎运行诊断信息（供健康检查使用） */
   getDiagnostics(): OrderBookDiagnostics {
     const now = Date.now();
     return {
@@ -325,7 +268,6 @@ export class OrderBookManager {
 
   /**
    * 显示刷新：
-   * 0. 条件性清理延迟删除（上一帧行数 >= depth 才执行）
    * 1. 用 refPrice 过滤 bid → 得到 bestBid（真实最优买价）
    * 2. 用 bestBid 作为 ask 的边界 → 边界由实际数据决定，不随 EMA 波动
    * 3. 如 bid 不足，用 bestAsk 扩展 bid 边界
@@ -334,18 +276,9 @@ export class OrderBookManager {
    */
   private flush() {
     if (!this.onFlush) return;
-    if (!this.dirty) {
-      if (DBG_ENABLED) this._d.flushSkipCleanCount++;
-      return;
-    }
+    if (!this.dirty) return;
     this.dirty = false;
 
-    // 延迟删除：不在 flush 中主动清理 pending deletes
-    // 自然清理机制：
-    //   1. applyLevels: 同价位 size>0 数据到来 → 自动取消 pending 标记
-    //   2. trimToMax: Map 超限时裁剪远端条目（含 pending 条目）
-    //   3. writeSnapshot: 快照重建时全量清理
-    // 仅在 pending 过多时强制清理（防止极端情况内存泄漏）
     const MAX_PENDING = 200;
     if (this.bidSide.pendingDeleteCount > MAX_PENDING) {
       this.bidSide.flushPendingDeletes();
@@ -359,57 +292,22 @@ export class OrderBookManager {
 
     const refBound = this.refPrice > 0 ? this.refPrice : undefined;
 
-    // Stage 1: bid 用 refPrice 过滤
     let bids = this.bidSide.top(this.depth, this.tickSize, refBound);
-    const s1BidCount = bids.length;
 
-    // Stage 2: ask 用 bestBid 作边界
     const bestBid = bids.length > 0 ? bids[0].price : 0;
     const askBound = bestBid > 0 ? bestBid : refBound;
     const asks = this.askSide.top(this.depth, this.tickSize, askBound);
 
-    // Stage 3: 如 bid 不足，用 bestAsk 作扩展边界
-    let s3Expanded = false;
     if (bids.length < this.depth && asks.length > 0) {
       const bestAsk = asks[0].price;
       const expanded = this.bidSide.top(this.depth, this.tickSize, bestAsk);
       if (expanded.length > bids.length) {
         bids = expanded;
-        s3Expanded = true;
       }
     }
 
     if (levelsEqual(bids, this.prevBids) && levelsEqual(asks, this.prevAsks)) {
-      if (DBG_ENABLED) {
-        this._d.flushCount++;
-        this._d.flushSkipEqualCount++;
-      }
       return;
-    }
-
-    if (DBG_ENABLED) {
-      this._d.flushCount++;
-      this._d.flushCallbackCount++;
-
-      const pb = this._d.prevBidRows;
-      const pa = this._d.prevAskRows;
-      const bidChanged = pb >= 0 && bids.length !== pb;
-      const askChanged = pa >= 0 && asks.length !== pa;
-
-      if (bidChanged || askChanged) {
-        const bestAskPrice = asks.length > 0 ? asks[0].price.toFixed(1) : "-";
-        console.log(
-          `[OB flush 行数变化]` +
-            ` bid ${pb}->${bids.length} (s1=${s1BidCount}${s3Expanded ? " s3扩展" : ""})` +
-            ` | ask ${pa}->${asks.length}` +
-            ` | ref=${this.refPrice.toFixed(1)} bestBid=${bestBid.toFixed(1)} askBound=${askBound?.toFixed(1) ?? "none"} bestAsk=${bestAskPrice}` +
-            ` | pend: bid=${this.bidSide.pendingDeleteCount} ask=${this.askSide.pendingDeleteCount}` +
-            ` | map: bid=${this.bidSide.size} ask=${this.askSide.size}`,
-        );
-      }
-
-      this._d.prevBidRows = bids.length;
-      this._d.prevAskRows = asks.length;
     }
 
     this.prevBids = bids;
@@ -418,35 +316,7 @@ export class OrderBookManager {
     this.onFlush(bids, asks);
   }
 
-  private dbgReport(now: number) {
-    const d = this._d;
-    const sec = ((now - d.lastReportAt) / 1000).toFixed(1);
-    const deltaRate = (d.deltaCount / parseFloat(sec)).toFixed(1);
-
-    const bestBid = this.prevBids.length > 0 ? this.prevBids[0].price.toFixed(1) : "-";
-    const bestAsk = this.prevAsks.length > 0 ? this.prevAsks[0].price.toFixed(1) : "-";
-    console.log(
-      `[OB ${sec}s]\n` +
-        `  Delta: ${d.deltaCount} (${deltaRate}/s) | dup: ${d.dupDeltaCount}\n` +
-        `  Bid: +${d.bidUpsert} upsert, -${d.bidZero} del(size=0) | Ask: +${d.askUpsert} upsert, -${d.askZero} del(size=0)\n` +
-        `  refPrice: ${this.refPrice.toFixed(1)} | bestBid: ${bestBid} | bestAsk: ${bestAsk}\n` +
-        `  Flush: ${d.flushCount}x (toUI ${d.flushCallbackCount}, skip:equal ${d.flushSkipEqualCount}, skip:clean ${d.flushSkipCleanCount})\n` +
-        `  UI rows: bid=${d.prevBidRows}, ask=${d.prevAskRows} | Map: bid=${this.bidSide.size}, ask=${this.askSide.size} | pend: bid=${this.bidSide.pendingDeleteCount}, ask=${this.askSide.pendingDeleteCount} | seq=${this.lastSeq}`,
-    );
-
-    d.deltaCount = 0;
-    d.dupDeltaCount = 0;
-    d.bidZero = 0;
-    d.askZero = 0;
-    d.bidUpsert = 0;
-    d.askUpsert = 0;
-    d.flushCount = 0;
-    d.flushCallbackCount = 0;
-    d.flushSkipEqualCount = 0;
-    d.flushSkipCleanCount = 0;
-    d.lastReportAt = now;
-  }
-
+  /** 取消 rAF 定时器 */
   private stopTimer() {
     if (this.flushTimer !== null) {
       cancelAnimationFrame(this.flushTimer);
@@ -455,13 +325,7 @@ export class OrderBookManager {
   }
 }
 
-function extractSize(raw: unknown): number {
-  if (Array.isArray(raw)) return Number(raw[1]);
-  if (typeof raw === "object" && raw !== null)
-    return Number((raw as Record<string, unknown>).size);
-  return -1;
-}
-
+/** 逐行比较两组档位是否完全一致（价格 + 数量），避免无变化时触发 UI 更新 */
 function levelsEqual(a: PriceLevel[], b: PriceLevel[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {

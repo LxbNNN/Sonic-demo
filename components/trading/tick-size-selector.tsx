@@ -1,5 +1,5 @@
 /**
- * 价格聚合粒度选择器（OKX 风格）
+ * 价格聚合粒度选择器
  *
  * 点击按钮展开下拉面板，选中后同时更新 store（UI）和 engine（数据）。
  */
@@ -56,11 +56,10 @@ export function TickSizeSelector() {
             <button
               key={tick}
               onClick={() => handleSelect(tick)}
-              className={`block w-full text-right px-3 py-1 text-[11px] font-mono transition-colors ${
-                tick === tickSize
+              className={`block w-full text-right px-3 py-1 text-[11px] font-mono transition-colors ${tick === tickSize
                   ? "text-primary bg-accent"
                   : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-              }`}
+                }`}
             >
               {tick}
             </button>

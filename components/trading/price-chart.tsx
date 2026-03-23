@@ -27,7 +27,8 @@ import type {
 export function PriceChart() {
   const t = useTranslations("chart");
   const marketId = useMarketStore((s) => s.marketId);
-  const trades = useTradeStore((s) => s.trades);
+  // 仅订阅最新一条成交（而非整个 trades 数组），减少不必要的 re-render
+  const latestTrade = useTradeStore((s) => s.trades[0] ?? null);
   const [interval, setInterval_] = useState<CandleInterval>("1m");
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -135,10 +136,9 @@ export function PriceChart() {
     };
   }, [initChart]);
 
+  // 实时成交 → 更新最后一根K线（同一时间槽内更新 OHLC，跨槽则新建K线）
   useEffect(() => {
-    if (!seriesRef.current || trades.length === 0) return;
-    const latestTrade = trades[0];
-    if (!latestTrade) return;
+    if (!seriesRef.current || !latestTrade) return;
 
     const candleTime = getCandleTime(latestTrade.ts, interval);
     const last = lastCandleRef.current;
@@ -169,7 +169,7 @@ export function PriceChart() {
       seriesRef.current.update(newCandle);
       lastCandleRef.current = newCandle;
     }
-  }, [trades, interval]);
+  }, [latestTrade, interval]);
 
   return (
     <div className="flex flex-col h-full">

@@ -2,14 +2,12 @@
  * 成交记录单行组件
  *
  * React.memo 优化：相同 trade 对象不重新渲染。
- * 新行挂载时触发闪烁动画（买入绿色 / 卖出红色）。
- * 使用 tradeId 作为 key 确保新成交获得新 DOM 元素触发动画。
+ * 零动画 / 零过渡：高频场景下只做文字差异更新，不触发任何 Paint 开销。
  */
 
 "use client";
 
 import React from "react";
-import { useTranslations } from "next-intl";
 import type { MarketId, Trade } from "@/lib/types";
 import { formatPrice, formatSize, formatTime } from "@/lib/format";
 
@@ -22,15 +20,10 @@ export const TradeRow = React.memo(function TradeRow({
   trade,
   marketId,
 }: TradeRowProps) {
-  const t = useTranslations("tradeTape");
   const isBuy = trade.side === "buy";
 
   return (
-    <div
-      className={`flex items-center h-[22px] px-3 text-[11px] font-mono tabular-nums hover:bg-accent/30 transition-colors cursor-default ${
-        isBuy ? "flash-buy" : "flash-sell"
-      }`}
-    >
+    <div className="flex items-center h-[22px] px-3 text-[11px] font-mono tabular-nums cursor-default">
       <span className={`flex-1 ${isBuy ? "text-long" : "text-short"}`}>
         {formatPrice(trade.price, marketId)}
       </span>
@@ -42,7 +35,7 @@ export const TradeRow = React.memo(function TradeRow({
       </span>
       {trade.aggCount && trade.aggCount > 1 ? (
         <span className="text-[10px] text-muted-foreground ml-2 w-12 text-right">
-          {t("aggregated")}x{trade.aggCount}
+          ×{trade.aggCount}
         </span>
       ) : (
         <span className="w-12 ml-2" />

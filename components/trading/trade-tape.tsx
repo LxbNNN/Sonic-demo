@@ -30,6 +30,7 @@ export function TradeTape() {
     overscan: 10,
   });
 
+  // 检测用户是否在手动滚动（scrollTop > 4 视为已离开顶部）
   const handleScroll = useCallback(() => {
     const el = parentRef.current;
     if (!el) return;
@@ -43,6 +44,7 @@ export function TradeTape() {
     return () => el.removeEventListener("scroll", handleScroll);
   }, [handleScroll]);
 
+  // 自动跟随：用户未手动滚动时，新成交自动置顶
   useEffect(() => {
     if (!isUserScrollingRef.current && trades.length > 0) {
       virtualizer.scrollToIndex(0, { align: "start" });
@@ -104,7 +106,7 @@ export function TradeTape() {
             const trade = trades[vItem.index];
             return (
               <div
-                key={trade.tradeId}
+                key={trade.stableKey ?? trade.tradeId}
                 style={{
                   position: "absolute",
                   top: 0,

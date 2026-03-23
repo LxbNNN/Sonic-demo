@@ -1,80 +1,33 @@
 /**
  * MarketService — 市场数据服务单例
  *
- * 设计原则（对齐 Binance/OKX 最佳实践）：
- * 1. 增量始终应用——不因同步状态阻塞 delta，避免任何冻结场景
- * 2. delta 驱动剪枝——引擎根据 delta 价格实时清理对侧陈旧条目，
- *    无需依赖频繁快照补偿，消除 20→10→20 抖动
- * 3. 快照仅限必要场景——初始加载、WS 重连、大 seq 缺口
- * 4. 容忍小 seq gap——仅大缺口触发快照修正，小缺口直接容忍
- * 5. 零死角兜底——健康检测覆盖 WS 静默死亡 + 同步超时卡死
+ * 双模式架构：
+ * - Worker 模式（默认）：WebSocket + 引擎运行在 Web Worker，主线程零计算开销
+ * - 主线程模式（降级）：浏览器不支持 Worker 或 Worker 加载失败时回退
+ *
+ * 主线程仅负责：接收 Worker 的预计算快照 → 写入 Zustand Store → UI 更新
  */
 
-import { WebSocketManager } from "./websocket-manager";
-import { OrderBookManager } from "./order-book-engine";
-import { smfsClient } from "./smfs-client";
-import { marketBus } from "./market-events";
-import {
-  DEFAULT_TRADE_DISPLAY_MODE,
-  WS_MARKET_URL,
-  ORDERBOOK_DEPTH,
-  OB_FLUSH_INTERVAL_MS,
-  DEFAULT_TICK_SIZE,
-  MAX_TRADES,
-  RESYNC_COOLDOWN_MS,
-  TRADE_AGG_WINDOW_MS,
-  TRADE_BATCH_MAX_ITEMS,
-} from "./constants";
 import { useOrderBookStore } from "@/stores/order-book-store";
 import { useTradeStore } from "@/stores/trade-store";
 import { useConnectionStore } from "@/stores/connection-store";
+import {
+  DEFAULT_TRADE_DISPLAY_MODE,
+  ORDERBOOK_DEPTH,
+  OB_FLUSH_INTERVAL_MS,
+  DEFAULT_TICK_SIZE,
+} from "./constants";
 import type {
   MarketId,
-  ConnectionStatus,
-  OrderBookSyncState,
-  Trade,
   TradeDisplayMode,
-  WsMessage,
-  WsBookDeltaMessage,
-  WsTradeMessage,
 } from "./types";
-
-/** 快照 HTTP 请求超时（ms） */
-const SNAPSHOT_TIMEOUT_MS = 10_000;
-
-/** 快照重试退避上限（ms） */
-const SNAPSHOT_RETRY_MAX_MS = 30_000;
-
-/** isFetching 最大保持时间（ms），超时强制重置 */
-const FETCH_GUARD_MS = 15_000;
-
-/** 连接健康检测间隔（ms） */
-const HEALTH_CHECK_MS = 5_000;
-
-/** 连接被判定为静默死亡的无消息阈值（ms） */
-const SILENT_DEATH_MS = 30_000;
-
-/** 非 live 状态持续超过此时间，强制进入 live（降级模式） */
-const SYNC_TIMEOUT_MS = 15_000;
-
-/** 全局无 delta 超过此时间判定为数据陈旧（ms） */
-const STALE_DATA_MS = 8_000;
-
-/** 单侧无 delta 超过此时间判定为单侧停滞（ms） */
-const SIDE_STALE_MS = 5_000;
-
-/** 另一侧在此时间内活跃时，才触发单侧停滞检测（ms） */
-const SIDE_ACTIVE_MS = 2_000;
-
-/** seq gap 小于此阈值时直接容忍（不触发快照修正） */
-const SEQ_GAP_TOLERANCE = 20;
-
-/** 快照请求最小间隔（防抖，ms） */
-const SNAPSHOT_DEBOUNCE_MS = 3_000;
+import type { MainToWorkerMessage, WorkerToMainMessage } from "./worker-messages";
+import { WorkerCmd, WorkerEvent } from "./enums";
 
 export class MarketService {
   private static instance: MarketService | null = null;
 
+  /** 获取全局唯一实例 */
   static getInstance(): MarketService {
     if (!MarketService.instance) {
       MarketService.instance = new MarketService();
@@ -82,32 +35,240 @@ export class MarketService {
     return MarketService.instance;
   }
 
+  /** Worker 线程实例（Worker 模式下有值） */
+  private worker: Worker | null = null;
+  /** 当前订阅的市场 ID */
+  private currentMarketId: MarketId | null = null;
+  /** 当前成交流展示模式 */
+  private tradeDisplayMode: TradeDisplayMode = DEFAULT_TRADE_DISPLAY_MODE;
+  /** 当前浏览器是否支持 Web Worker */
+  private workerSupported = false;
+
+  private constructor() {
+    this.workerSupported = typeof Worker !== "undefined";
+  }
+
+  /**
+   * 切换市场：清理旧连接 → 初始化 Store → 启动 Worker（或降级到主线程）
+   * 若重复切换同一市场则忽略
+   */
+  switchMarket(marketId: MarketId) {
+    if (this.currentMarketId === marketId && this.worker) return;
+
+    this.cleanup();
+    this.currentMarketId = marketId;
+
+    // 初始化 Store 默认值
+    const defaultTick = DEFAULT_TICK_SIZE[marketId] ?? 0.1;
+    useOrderBookStore.getState().setTickSize(defaultTick);
+    useTradeStore.getState().setDisplayMode(this.tradeDisplayMode);
+    useConnectionStore.getState().setOrderBookSyncState("syncing", "market_switch");
+
+    // 优先使用 Worker 模式
+    if (this.workerSupported) {
+      try {
+        this.startWorker(marketId, defaultTick);
+        return;
+      } catch {
+        this.workerSupported = false;
+      }
+    }
+
+    // Worker 不可用，降级到主线程模式
+    this.startMainThread(marketId, defaultTick);
+  }
+
+  /** 停止所有服务并清理资源 */
+  stop() {
+    this.cleanup();
+  }
+
+  /** 修改价格聚合粒度，同步通知 Worker 和 Store */
+  setTickSize(tick: number) {
+    if (this.worker) {
+      this.postToWorker({ type: WorkerCmd.SetTickSize, tick });
+    }
+    useOrderBookStore.getState().setTickSize(tick);
+  }
+
+  /** 切换成交流展示模式（raw / readable），同步通知 Worker 和 Store */
+  setTradeDisplayMode(mode: TradeDisplayMode) {
+    this.tradeDisplayMode = mode;
+    useTradeStore.getState().setDisplayMode(mode);
+    if (this.worker) {
+      this.postToWorker({ type: WorkerCmd.SetTradeDisplayMode, mode });
+    }
+  }
+
+  // ---- Worker 模式 ----
+
+  /** 创建 Worker 线程，注册消息回调，发送初始化指令 */
+  private startWorker(marketId: MarketId, defaultTick: number) {
+    this.worker = new Worker(
+      new URL("./market.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+
+    // Worker → 主线程消息：写入对应 Zustand Store
+    this.worker.onmessage = (e: MessageEvent<WorkerToMainMessage>) => {
+      this.handleWorkerMessage(e.data);
+    };
+
+    // Worker 加载/运行异常 → 降级到主线程模式
+    this.worker.onerror = () => {
+      this.workerSupported = false;
+      this.cleanup();
+      this.startMainThread(marketId, defaultTick);
+    };
+
+    // 发送「切换市场」指令给 Worker
+    this.postToWorker({
+      type: WorkerCmd.SwitchMarket,
+      marketId,
+      defaultTick,
+      depth: ORDERBOOK_DEPTH,
+      flushIntervalMs: OB_FLUSH_INTERVAL_MS,
+    });
+  }
+
+  /** 处理 Worker 推送的数据快照，分发到各 Zustand Store */
+  private handleWorkerMessage(msg: WorkerToMainMessage) {
+    switch (msg.type) {
+      case WorkerEvent.BookUpdate:
+        useOrderBookStore.getState().setBook(msg.bids, msg.asks);
+        break;
+      case WorkerEvent.TradeUpdate:
+        useTradeStore.getState().setTrades(msg.trades);
+        break;
+      case WorkerEvent.ConnectionStatus:
+        useConnectionStore.getState().setStatus(msg.status);
+        break;
+      case WorkerEvent.SyncState:
+        useConnectionStore.getState().setOrderBookSyncState(msg.state, msg.reason);
+        break;
+      case WorkerEvent.Rates:
+        useConnectionStore.getState().setRates(msg.bookRate, msg.tradeRate);
+        break;
+    }
+  }
+
+  /** 类型安全的 Worker 消息发送 */
+  private postToWorker(msg: MainToWorkerMessage) {
+    this.worker?.postMessage(msg);
+  }
+
+  // ---- 主线程降级模式 ----
+
+  private mainThreadService: MainThreadMarketService | null = null;
+
+  /** 创建主线程市场服务实例并启动 */
+  private startMainThread(marketId: MarketId, defaultTick: number) {
+    this.mainThreadService = new MainThreadMarketService();
+    this.mainThreadService.switchMarket(marketId, defaultTick);
+  }
+
+  // ---- 清理 ----
+
+  /** 终止 Worker / 主线程服务，重置所有状态 */
+  private cleanup() {
+    if (this.worker) {
+      this.postToWorker({ type: WorkerCmd.Stop });
+      this.worker.terminate();
+      this.worker = null;
+    }
+    if (this.mainThreadService) {
+      this.mainThreadService.stop();
+      this.mainThreadService = null;
+    }
+    this.currentMarketId = null;
+    useConnectionStore.getState().setOrderBookSyncState("init");
+  }
+}
+
+// ==================== 主线程降级实现 ====================
+
+import { WebSocketManager } from "./websocket-manager";
+import { OrderBookManager } from "./order-book-engine";
+import { smfsClient } from "./smfs-client";
+import { marketBus } from "./market-events";
+import {
+  WS_MARKET_URL,
+  MAX_TRADES,
+  RESYNC_COOLDOWN_MS,
+  TRADE_AGG_WINDOW_MS,
+  TRADE_BATCH_MAX_ITEMS,
+} from "./constants";
+import type {
+  ConnectionStatus,
+  OrderBookSyncState,
+  Trade,
+  WsMessage,
+  WsBookDeltaMessage,
+  WsTradeMessage,
+} from "./types";
+
+/** 快照请求超时（毫秒） */
+const SNAPSHOT_TIMEOUT_MS = 10_000;
+/** 快照重试最大延迟（毫秒，指数退避上限） */
+const SNAPSHOT_RETRY_MAX_MS = 30_000;
+/** fetch 卡死保护超时（超过此时间强制重置 isFetching） */
+const FETCH_GUARD_MS = 15_000;
+/** 健康检查间隔（毫秒） */
+const HEALTH_CHECK_MS = 5_000;
+/** 无消息超时阈值，超过判定连接假死并重连 */
+const SILENT_DEATH_MS = 30_000;
+/** 同步状态停留过久阈值，超过强制恢复到 live */
+const SYNC_TIMEOUT_MS = 15_000;
+/** 全局数据过期阈值（所有侧均无更新） */
+const STALE_DATA_MS = 8_000;
+/** 单侧数据过期阈值（配合 SIDE_ACTIVE_MS 检测买/卖失衡） */
+const SIDE_STALE_MS = 5_000;
+/** 单侧活跃判定阈值 */
+const SIDE_ACTIVE_MS = 2_000;
+/** 序列号跳跃容忍上限（超过则触发快照重拉） */
+const SEQ_GAP_TOLERANCE = 20;
+/** 快照请求防抖间隔（毫秒） */
+const SNAPSHOT_DEBOUNCE_MS = 3_000;
+
+/**
+ * 主线程降级市场服务
+ *
+ * 当 Web Worker 不可用时，WebSocket + OrderBookEngine + 成交聚合
+ * 全部在主线程运行。逻辑与 market.worker.ts 对称。
+ */
+class MainThreadMarketService {
   private ws: WebSocketManager | null = null;
   private currentMarketId: MarketId | null = null;
   private obManager = OrderBookManager.getInstance();
 
-  // ---- 快照拉取 ----
+  /** 快照请求锁 */
   private isFetching = false;
+  /** 当前快照请求的开始时间（用于 FETCH_GUARD 超时保护） */
   private fetchStartedAt = 0;
+  /** 快照重试定时器 */
   private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 当前连续重试次数（用于指数退避） */
   private retryAttempt = 0;
+  /** 上次快照请求时间（防抖） */
   private lastFetchAt = 0;
+  /** 上次触发重同步时间（冷却） */
   private lastResyncAt = 0;
 
-  // ---- 速率统计 ----
+  /** 吞吐速率统计定时器 */
   private rateTimer: ReturnType<typeof setInterval> | null = null;
+  /** 当前周期内订单簿消息计数 */
   private bookCount = 0;
+  /** 当前周期内成交消息计数 */
   private tradeCount = 0;
 
-  // ---- trade 批处理 ----
+  /** 成交缓冲区（攒批后一次性刷新到 Store） */
   private tradeBuf: Trade[] = [];
+  /** 成交刷新定时器 */
   private tradeFlushTimer: ReturnType<typeof setInterval> | null = null;
-  private tradeDisplayMode: TradeDisplayMode = DEFAULT_TRADE_DISPLAY_MODE;
-
-  // ---- 连接健康监控 ----
+  /** 健康检查定时器 */
   private healthTimer: ReturnType<typeof setInterval> | null = null;
 
-  private constructor() {
+  constructor() {
     marketBus.on("book_delta", this.handleBookDelta);
     marketBus.on("trade", this.handleTrade);
     marketBus.on("reset", this.handleReset);
@@ -115,16 +276,10 @@ export class MarketService {
     marketBus.on("request_snapshot", this.handleRequestSnapshot);
   }
 
-  /** 切换市场（幂等：相同 marketId 且 WS 已连接则跳过） */
-  switchMarket(marketId: MarketId) {
-    if (this.currentMarketId === marketId && this.ws) return;
-
+  /** 切换市场：重置引擎 → 建立 WebSocket → 启动各周期任务 */
+  switchMarket(marketId: MarketId, defaultTick: number) {
     this.cleanup();
     this.currentMarketId = marketId;
-
-    const defaultTick = DEFAULT_TICK_SIZE[marketId] ?? 0.1;
-    useOrderBookStore.getState().setTickSize(defaultTick);
-    useTradeStore.getState().setDisplayMode(this.tradeDisplayMode);
 
     this.obManager
       .reset()
@@ -148,25 +303,17 @@ export class MarketService {
     this.startHealthCheck();
   }
 
-  /** 停止所有活动（组件卸载时调用） */
+  /** 停止服务并注销事件监听 */
   stop() {
     this.cleanup();
+    marketBus.off("book_delta", this.handleBookDelta);
+    marketBus.off("trade", this.handleTrade);
+    marketBus.off("reset", this.handleReset);
+    marketBus.off("status_change", this.handleStatusChange);
+    marketBus.off("request_snapshot", this.handleRequestSnapshot);
   }
 
-  /** 设置价格聚合粒度（UI 调用） */
-  setTickSize(tick: number) {
-    this.obManager.setTickSize(tick);
-    useOrderBookStore.getState().setTickSize(tick);
-  }
-
-  /** 设置成交流展示模式（raw/readable） */
-  setTradeDisplayMode(mode: TradeDisplayMode) {
-    this.tradeDisplayMode = mode;
-    useTradeStore.getState().setDisplayMode(mode);
-  }
-
-  // ---- WS 消息分发 ----
-
+  /** 将原始 WebSocket 消息按类型分发到事件总线 */
   private dispatchWsMessage = (raw: unknown) => {
     const msg = raw as WsMessage;
     switch (msg.type) {
@@ -179,22 +326,14 @@ export class MarketService {
       case "reset":
         marketBus.emit("reset", msg);
         break;
-      default:
-        break;
     }
   };
 
-  // ---- 事件处理器 ----
-
   /**
-   * 核心设计：增量始终应用，不因同步状态阻塞。
-   *
-   * seq 判定逻辑：
-   * - msg.seq <= lastSeq 且差距小 → 正常去重，丢弃
-   * - msg.seq <= lastSeq 且差距大（倒跳） → 服务端 seq 重置，清空锚点 + 快照修正 + 应用
-   * - msg.seq > lastSeq 且 gap 小 → 容忍并应用
-   * - msg.seq > lastSeq 且 gap 大 → 快照修正 + 应用
-   * - lastSeq = -1（未锚定） → 直接应用，首条 delta 锚定
+   * 处理订单簿增量：
+   * 1. 过滤非当前市场消息
+   * 2. 检测序列号连续性（回退/跳跃 → 触发快照重拉）
+   * 3. 写入引擎
    */
   private handleBookDelta = (msg: WsBookDeltaMessage) => {
     if (msg.marketId !== this.currentMarketId) return;
@@ -203,27 +342,25 @@ export class MarketService {
     const lastSeq = this.obManager.getLastSeq();
     if (lastSeq >= 0) {
       if (msg.seq <= lastSeq) {
+        // 序列号回退：容忍小幅度回退（乱序），超出阈值则重拉快照
         if (lastSeq - msg.seq > SEQ_GAP_TOLERANCE) {
-          console.warn(
-            `[MarketService] seq backward jump: ${lastSeq} → ${msg.seq}, re-anchoring`,
-          );
           this.obManager.clearLastSeq();
           this.ensureSnapshotFetch(`seq_backward_${lastSeq}_to_${msg.seq}`);
         } else {
           return;
         }
       } else {
+        // 序列号跳跃：可能丢失中间消息，超出容忍则重拉快照
         const gap = msg.seq - lastSeq - 1;
         if (gap > SEQ_GAP_TOLERANCE) {
-          this.ensureSnapshotFetch(
-            `seq_gap_expected_${lastSeq + 1}_got_${msg.seq}`,
-          );
+          this.ensureSnapshotFetch(`seq_gap_expected_${lastSeq + 1}_got_${msg.seq}`);
         }
       }
     }
     this.obManager.applyDelta(msg);
   };
 
+  /** 缓存实时成交到 tradeBuf，由 flushTrades 定期批量写入 Store */
   private handleTrade = (msg: WsTradeMessage) => {
     if (msg.marketId !== this.currentMarketId) return;
     this.tradeCount++;
@@ -237,47 +374,48 @@ export class MarketService {
     });
   };
 
+  /** 服务端要求重置 → 触发快照重拉 */
   private handleReset = () => {
     this.ensureSnapshotFetch("server_reset");
   };
 
+  /** WebSocket 连接状态变化：连上后立即拉取快照 */
   private handleStatusChange = (status: ConnectionStatus) => {
     useConnectionStore.getState().setStatus(status);
     if (status === "connected") {
-      // 新 WS 连接可能使用不同的 seq 编号空间（常见于每连接递增的服务端）
-      // 必须在 fetchSnapshot 之前重置，否则异步等待期间 delta 全部被去重丢弃
       this.obManager.clearLastSeq();
       this.setOrderBookSyncState("syncing", "ws_connected");
       this.fetchSnapshot(true);
     }
   };
 
+  /** 看门狗请求快照 */
   private handleRequestSnapshot = () => {
     this.ensureSnapshotFetch("watchdog_request");
   };
 
-  // ---- 快照拉取 ----
-
-  /**
-   * 节流的快照请求入口——合并高频请求，防止风暴。
-   * 仅在 seq 大缺口/WS 重连/watchdog 等必要场景触发。
-   */
+  /** 带冷却的快照重拉入口（防止短时间内重复触发） */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private ensureSnapshotFetch(reason: string) {
     const now = Date.now();
     if (now - this.lastResyncAt < RESYNC_COOLDOWN_MS) return;
     this.lastResyncAt = now;
-    console.debug(`[MarketService] snapshot requested: ${reason}`);
-    marketBus.emit("orderbook_resync_reason", { reason, at: now });
     this.fetchSnapshot(true);
   }
 
+  /**
+   * 拉取订单簿快照：
+   * - 防抖 + fetch 锁 + 超时 abort
+   * - 成功后替换引擎数据、初始化成交列表、切换到 live 状态
+   * - 失败后指数退避重试
+   */
   private async fetchSnapshot(force = false) {
     const now = Date.now();
     if (!force && now - this.lastFetchAt < SNAPSHOT_DEBOUNCE_MS) return;
 
+    // fetch 锁：防止并发请求，超时自动解锁
     if (this.isFetching) {
       if (now - this.fetchStartedAt > FETCH_GUARD_MS) {
-        console.warn("[MarketService] isFetching stuck, force reset");
         this.isFetching = false;
       } else {
         return;
@@ -294,29 +432,17 @@ export class MarketService {
     const timeout = setTimeout(() => abortCtrl.abort(), SNAPSHOT_TIMEOUT_MS);
 
     try {
-      const snap = await smfsClient.getSnapshot(
-        this.currentMarketId,
-        abortCtrl.signal,
-      );
-
+      const snap = await smfsClient.getSnapshot(this.currentMarketId, abortCtrl.signal);
       if (snap.marketId !== this.currentMarketId) return;
       this.obManager.replaceSnapshot(
         snap.bids as unknown[],
         snap.asks as unknown[],
         snap.snapshotSeq,
       );
-      useTradeStore
-        .getState()
-        .setTrades(this.normalizeTrades(snap.recentTrades));
-
+      useTradeStore.getState().setTrades(this.normalizeTrades(snap.recentTrades));
       this.setOrderBookSyncState("live");
       this.retryAttempt = 0;
-    } catch (e) {
-      if ((e as Error).name !== "AbortError") {
-        console.error("[MarketService] snapshot fetch failed:", e);
-      } else {
-        console.warn("[MarketService] snapshot fetch timed out");
-      }
+    } catch {
       this.retryAttempt++;
       this.scheduleSnapshotRetry();
     } finally {
@@ -325,24 +451,14 @@ export class MarketService {
     }
   }
 
-  /**
-   * 快照失败后的退避重试——仅在失败时调度，成功后不再定期拉取。
-   * 正常运行期间的陈旧条目由 delta 驱动剪枝处理，无需周期性快照。
-   */
+  /** 指数退避重试：delay = min(2s × 2^attempt, 30s) */
   private scheduleSnapshotRetry() {
     this.cancelScheduledFetch();
-    const delay = Math.min(
-      2_000 * Math.pow(2, this.retryAttempt),
-      SNAPSHOT_RETRY_MAX_MS,
-    );
-    console.debug(
-      `[MarketService] scheduling snapshot retry in ${delay}ms (attempt ${this.retryAttempt})`,
-    );
-    this.snapshotTimer = setTimeout(() => {
-      this.fetchSnapshot(true);
-    }, delay);
+    const delay = Math.min(2_000 * Math.pow(2, this.retryAttempt), SNAPSHOT_RETRY_MAX_MS);
+    this.snapshotTimer = setTimeout(() => this.fetchSnapshot(true), delay);
   }
 
+  /** 取消已计划的快照重试 */
   private cancelScheduledFetch() {
     if (this.snapshotTimer !== null) {
       clearTimeout(this.snapshotTimer);
@@ -350,177 +466,31 @@ export class MarketService {
     }
   }
 
-  // ---- trade 批处理 ----
-
+  /**
+   * 定时刷新成交缓冲区：
+   * - raw 模式：逆序截取最新 N 条
+   * - readable 模式：按价格+方向聚合同窗口内成交
+   */
   private flushTrades = () => {
     if (this.tradeBuf.length === 0) return;
     const buf = this.tradeBuf;
     this.tradeBuf = [];
 
-    const latest =
-      this.tradeDisplayMode === "raw"
-        ? this.toRawTrades(buf)
-        : this.toReadableTrades(buf);
+    const tradeDisplayMode = useTradeStore.getState().displayMode;
+    const latest = tradeDisplayMode === "raw"
+      ? [...buf].reverse().slice(0, TRADE_BATCH_MAX_ITEMS)
+      : this.toReadableTrades(buf);
 
     const store = useTradeStore.getState();
     const merged = [...latest, ...store.trades].slice(0, MAX_TRADES);
     store.setTrades(merged);
   };
 
-  // ---- 连接健康监控 ----
-
-  private checkHealth = () => {
-    if (!this.ws || !this.currentMarketId) return;
-    const now = Date.now();
-
-    // 1. WebSocket 静默死亡检测
-    const lastMsg = this.ws.getLastMessageAt();
-    if (
-      lastMsg > 0 &&
-      now - lastMsg > SILENT_DEATH_MS &&
-      this.ws.isOpen()
-    ) {
-      console.warn("[MarketService] silent connection detected, reconnecting");
-      const wsUrl = `${WS_MARKET_URL}?marketId=${this.currentMarketId}`;
-      this.ws.reconnect(wsUrl);
-      return;
-    }
-
-    // 2. 同步超时检测——防止非 live 状态永久卡死
-    const syncState = this.obManager.getSyncState();
-    if (syncState !== "live" && syncState !== "init") {
-      const diag = this.obManager.getDiagnostics();
-      if (diag.stateDurationMs > SYNC_TIMEOUT_MS) {
-        console.warn(
-          `[MarketService] sync stuck in "${syncState}" for ${diag.stateDurationMs}ms, forcing live + refetch`,
-        );
-        this.setOrderBookSyncState("live");
-        this.fetchSnapshot(true);
-        return;
-      }
-    }
-
-    // 3. 订单簿数据陈旧检测（从引擎 flush 中移入）
-    const diag = this.obManager.getDiagnostics();
-
-    if (diag.lastDeltaAt > 0) {
-      const deltaAge = now - diag.lastDeltaAt;
-      if (deltaAge > STALE_DATA_MS) {
-        marketBus.emit("orderbook_stall_detected", {
-          kind: "global_stale",
-          bidAgeMs: diag.lastBidDeltaAt > 0 ? now - diag.lastBidDeltaAt : 0,
-          askAgeMs: diag.lastAskDeltaAt > 0 ? now - diag.lastAskDeltaAt : 0,
-          deltaAgeMs: deltaAge,
-          at: now,
-        });
-        this.ensureSnapshotFetch("global_stale");
-        return;
-      }
-    }
-
-    // 4. 单侧停滞检测——一侧活跃但另一侧长时间无更新
-    if (diag.lastBidDeltaAt > 0 && diag.lastAskDeltaAt > 0) {
-      const bidAge = now - diag.lastBidDeltaAt;
-      const askAge = now - diag.lastAskDeltaAt;
-      if (
-        (bidAge < SIDE_ACTIVE_MS && askAge > SIDE_STALE_MS) ||
-        (askAge < SIDE_ACTIVE_MS && bidAge > SIDE_STALE_MS)
-      ) {
-        marketBus.emit("orderbook_stall_detected", {
-          kind: "side_imbalance",
-          bidAgeMs: bidAge,
-          askAgeMs: askAge,
-          deltaAgeMs: diag.lastDeltaAt > 0 ? now - diag.lastDeltaAt : 0,
-          at: now,
-        });
-        this.ensureSnapshotFetch("side_imbalance");
-      }
-    }
-  };
-
-  // ---- 定时器管理 ----
-
-  private startRateCounter() {
-    this.stopRateCounter();
-    this.bookCount = 0;
-    this.tradeCount = 0;
-    this.rateTimer = setInterval(() => {
-      useConnectionStore.getState().setRates(this.bookCount, this.tradeCount);
-      this.bookCount = 0;
-      this.tradeCount = 0;
-    }, 1000);
-  }
-
-  private stopRateCounter() {
-    if (this.rateTimer !== null) {
-      clearInterval(this.rateTimer);
-      this.rateTimer = null;
-    }
-  }
-
-  private startTradeFlush() {
-    this.stopTradeFlush();
-    this.tradeBuf = [];
-    this.tradeFlushTimer = setInterval(this.flushTrades, TRADE_AGG_WINDOW_MS);
-  }
-
-  private stopTradeFlush() {
-    if (this.tradeFlushTimer !== null) {
-      clearInterval(this.tradeFlushTimer);
-      this.tradeFlushTimer = null;
-    }
-    this.flushTrades();
-  }
-
-  private startHealthCheck() {
-    this.stopHealthCheck();
-    this.healthTimer = setInterval(this.checkHealth, HEALTH_CHECK_MS);
-  }
-
-  private stopHealthCheck() {
-    if (this.healthTimer !== null) {
-      clearInterval(this.healthTimer);
-      this.healthTimer = null;
-    }
-  }
-
-  private cleanup() {
-    this.obManager.stop();
-    this.obManager.reset();
-    this.stopRateCounter();
-    this.cancelScheduledFetch();
-    this.stopTradeFlush();
-    this.stopHealthCheck();
-    this.retryAttempt = 0;
-    this.lastFetchAt = 0;
-    this.lastResyncAt = 0;
-    useConnectionStore.getState().setOrderBookSyncState("init");
-    if (this.ws) {
-      this.ws.disconnect();
-      this.ws = null;
-    }
-  }
-
-  private setOrderBookSyncState(state: OrderBookSyncState, reason?: string) {
-    this.obManager.setSyncState(state, reason);
-    useConnectionStore.getState().setOrderBookSyncState(state, reason);
-  }
-
-  private normalizeTrades(trades: Trade[]): Trade[] {
-    return trades.map((t) => ({
-      tradeId: t.tradeId,
-      ts: t.ts,
-      price: t.price,
-      size: t.size,
-      side: t.side,
-      aggCount: t.aggCount ?? 1,
-    }));
-  }
-
-  private toRawTrades(buf: Trade[]): Trade[] {
-    return [...buf].reverse().slice(0, TRADE_BATCH_MAX_ITEMS);
-  }
-
+  /**
+   * 可读模式成交聚合：
+   * 相同方向+价格且时间差 ≤ TRADE_AGG_WINDOW_MS 的成交合并为一条，
+   * 生成 stableKey 保证虚拟列表 key 稳定
+   */
   private toReadableTrades(buf: Trade[]): Trade[] {
     const ordered = [...buf].sort((a, b) => b.ts - a.ts);
     const agg = new Map<string, Trade>();
@@ -539,13 +509,11 @@ export class MarketService {
         continue;
       }
 
+      const stableKey = `${t.side}:${t.price}:${t.tradeId}`;
       const next: Trade = {
-        tradeId: t.tradeId,
-        ts: t.ts,
-        price: t.price,
-        size: t.size,
-        side: t.side,
-        aggCount: t.aggCount ?? 1,
+        tradeId: t.tradeId, ts: t.ts, price: t.price,
+        size: t.size, side: t.side, aggCount: t.aggCount ?? 1,
+        stableKey,
       };
       agg.set(key, next);
       out.push(next);
@@ -553,5 +521,129 @@ export class MarketService {
     }
 
     return out;
+  }
+
+  /**
+   * 定期健康检查：
+   * 1. 连接假死检测（长时间无消息 → 强制重连）
+   * 2. 同步状态超时（非 live 停留过久 → 恢复并重拉）
+   * 3. 全局数据过期（所有侧均无更新 → 重拉快照）
+   * 4. 单侧失衡检测（一侧活跃另一侧过期 → 重拉快照）
+   */
+  private checkHealth = () => {
+    if (!this.ws || !this.currentMarketId) return;
+    const now = Date.now();
+
+    // 连接假死：长时间无消息但 WebSocket 仍处于 OPEN
+    const lastMsg = this.ws.getLastMessageAt();
+    if (lastMsg > 0 && now - lastMsg > SILENT_DEATH_MS && this.ws.isOpen()) {
+      const wsUrl = `${WS_MARKET_URL}?marketId=${this.currentMarketId}`;
+      this.ws.reconnect(wsUrl);
+      return;
+    }
+
+    // 同步状态超时：syncing/resyncing 停留过久 → 强制恢复到 live 并重拉
+    const syncState = this.obManager.getSyncState();
+    if (syncState !== "live" && syncState !== "init") {
+      const diag = this.obManager.getDiagnostics();
+      if (diag.stateDurationMs > SYNC_TIMEOUT_MS) {
+        this.setOrderBookSyncState("live");
+        this.fetchSnapshot(true);
+        return;
+      }
+    }
+
+    const diag = this.obManager.getDiagnostics();
+
+    // 全局数据过期
+    if (diag.lastDeltaAt > 0) {
+      const deltaAge = now - diag.lastDeltaAt;
+      if (deltaAge > STALE_DATA_MS) {
+        this.ensureSnapshotFetch("global_stale");
+        return;
+      }
+    }
+
+    // 单侧失衡：一侧活跃另一侧过期
+    if (diag.lastBidDeltaAt > 0 && diag.lastAskDeltaAt > 0) {
+      const bidAge = now - diag.lastBidDeltaAt;
+      const askAge = now - diag.lastAskDeltaAt;
+      if (
+        (bidAge < SIDE_ACTIVE_MS && askAge > SIDE_STALE_MS) ||
+        (askAge < SIDE_ACTIVE_MS && bidAge > SIDE_STALE_MS)
+      ) {
+        this.ensureSnapshotFetch("side_imbalance");
+      }
+    }
+  };
+
+  /** 启动吞吐速率统计（每秒上报一次） */
+  private startRateCounter() {
+    this.stopRateCounter();
+    this.bookCount = 0;
+    this.tradeCount = 0;
+    this.rateTimer = setInterval(() => {
+      useConnectionStore.getState().setRates(this.bookCount, this.tradeCount);
+      this.bookCount = 0;
+      this.tradeCount = 0;
+    }, 1000);
+  }
+
+  private stopRateCounter() {
+    if (this.rateTimer !== null) { clearInterval(this.rateTimer); this.rateTimer = null; }
+  }
+
+  /** 启动成交缓冲区定时刷新 */
+  private startTradeFlush() {
+    this.stopTradeFlush();
+    this.tradeBuf = [];
+    this.tradeFlushTimer = setInterval(this.flushTrades, TRADE_AGG_WINDOW_MS);
+  }
+
+  private stopTradeFlush() {
+    if (this.tradeFlushTimer !== null) { clearInterval(this.tradeFlushTimer); this.tradeFlushTimer = null; }
+    this.flushTrades();
+  }
+
+  /** 启动定期健康检查 */
+  private startHealthCheck() {
+    this.stopHealthCheck();
+    this.healthTimer = setInterval(this.checkHealth, HEALTH_CHECK_MS);
+  }
+
+  private stopHealthCheck() {
+    if (this.healthTimer !== null) { clearInterval(this.healthTimer); this.healthTimer = null; }
+  }
+
+  /** 统一设置订单簿同步状态（引擎 + Store 双写） */
+  private setOrderBookSyncState(state: OrderBookSyncState, reason?: string) {
+    this.obManager.setSyncState(state, reason);
+    useConnectionStore.getState().setOrderBookSyncState(state, reason);
+  }
+
+  /** 标准化成交记录（确保必填字段完整） */
+  private normalizeTrades(trades: Trade[]): Trade[] {
+    return trades.map((t) => ({
+      tradeId: t.tradeId, ts: t.ts, price: t.price,
+      size: t.size, side: t.side, aggCount: t.aggCount ?? 1,
+    }));
+  }
+
+  /** 清理所有资源：引擎、定时器、WebSocket */
+  private cleanup() {
+    this.obManager.stop();
+    this.obManager.reset();
+    this.stopRateCounter();
+    this.cancelScheduledFetch();
+    this.stopTradeFlush();
+    this.stopHealthCheck();
+    this.retryAttempt = 0;
+    this.lastFetchAt = 0;
+    this.lastResyncAt = 0;
+    useConnectionStore.getState().setOrderBookSyncState("init");
+    if (this.ws) {
+      this.ws.disconnect();
+      this.ws = null;
+    }
   }
 }

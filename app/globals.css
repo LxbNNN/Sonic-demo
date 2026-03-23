@@ -144,49 +144,6 @@
   }
 }
 
-/* 订单簿深度条过渡动画 */
-.depth-bar {
-  transition: width 200ms ease-out;
-}
-.depth-bar-bid {
-  background: linear-gradient(
-    to left,
-    rgba(0, 181, 120, 0.22),
-    rgba(0, 181, 120, 0.04)
-  );
-}
-.depth-bar-ask {
-  background: linear-gradient(
-    to right,
-    rgba(246, 70, 93, 0.22),
-    rgba(246, 70, 93, 0.04)
-  );
-}
-
-/* 新成交行闪烁动画 */
-@keyframes flash-buy {
-  0% {
-    background-color: rgba(0, 181, 120, 0.18);
-  }
-  100% {
-    background-color: transparent;
-  }
-}
-@keyframes flash-sell {
-  0% {
-    background-color: rgba(246, 70, 93, 0.18);
-  }
-  100% {
-    background-color: transparent;
-  }
-}
-.flash-buy {
-  animation: flash-buy 700ms ease-out;
-}
-.flash-sell {
-  animation: flash-sell 700ms ease-out;
-}
-
 /* 自定义滚动条 */
 .scrollbar-thin::-webkit-scrollbar {
   width: 4px;

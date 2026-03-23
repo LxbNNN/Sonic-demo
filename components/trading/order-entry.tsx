@@ -7,7 +7,7 @@
 
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { BN, ZERO } from "@/lib/bn";
 import { Input } from "@/components/ui/input";
@@ -20,7 +20,6 @@ import type { OrderType, Side } from "@/lib/types";
 export function OrderEntry() {
   const t = useTranslations("orderEntry");
   const marketId = useMarketStore((s) => s.marketId);
-  const midPrice = useOrderBookStore((s) => s.midPrice);
 
   const [orderType, setOrderType] = useState<OrderType>("limit");
   const [side, setSide] = useState<Side>("buy");
@@ -31,6 +30,18 @@ export function OrderEntry() {
     ok: boolean;
     msg: string;
   } | null>(null);
+
+  // 限价输入框 placeholder 跟随中间价实时更新
+  // 使用 useRef + subscribe 直写 DOM，避免高频 midPrice 变化触发整个表单 re-render
+  const priceInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (orderType !== "limit") return;
+    return useOrderBookStore.subscribe((s) => {
+      if (priceInputRef.current) {
+        priceInputRef.current.placeholder = s.midPrice > 0 ? s.midPrice.toFixed(2) : "0.00";
+      }
+    });
+  }, [orderType]);
 
   const handleSubmit = useCallback(async () => {
     const sizeBN = BN(size);
@@ -69,7 +80,6 @@ export function OrderEntry() {
 
   const baseAsset = marketId === "BTC-PERP" ? "BTC" : "SOL";
   const isBuy = side === "buy";
-  const midPriceDisplay = BN(midPrice).gt(0) ? BN(midPrice).toFixed(2) : "0.00";
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -124,9 +134,10 @@ export function OrderEntry() {
             <span className="text-[10px] text-muted-foreground">USDT</span>
           </div>
           <Input
+            ref={priceInputRef}
             type="number"
             step="any"
-            placeholder={midPriceDisplay}
+            placeholder="0.00"
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             className="h-9 font-mono tabular-nums text-sm bg-accent/60 border-border"

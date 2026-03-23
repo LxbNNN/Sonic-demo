@@ -70,6 +70,8 @@ export interface Trade {
   side: Side;
   /** readable 模式下短窗聚合笔数（原始成交默认为 1） */
   aggCount?: number;
+  /** 聚合稳定 key，首次创建时锚定，后续聚合不变 */
+  stableKey?: string;
 }
 
 /** GET /markets/:marketId/snapshot 响应 — 订单簿快照 */

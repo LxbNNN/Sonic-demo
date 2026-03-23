@@ -6,7 +6,6 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { BN } from "@/lib/bn";
 import { useConnectionStore } from "@/stores/connection-store";
 import { Activity } from "lucide-react";
 
@@ -19,7 +18,7 @@ export function MessageRate() {
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <Activity className="h-3 w-3" />
       <span className="font-mono tabular-nums">
-        {BN(bookRate).plus(tradeRate).toFixed(0)} {t("unit")}
+        {(bookRate + tradeRate).toFixed(0)} {t("unit")}
       </span>
     </div>
   );
