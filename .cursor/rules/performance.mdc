@@ -1,0 +1,43 @@
+---
+description: 性能约束：高频 WebSocket 场景下的渲染和计算规范，防止主线程被阻塞
+globs: "{lib,components,hooks,stores}/**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# 性能约束
+
+## 线程模型
+- **所有 WebSocket 处理、订单簿计算、成交聚合、速率统计** 必须在 Web Worker 线程执行
+- 主线程只做两件事：接收 `postMessage` 数据、写入 Zustand Store
+- 禁止在主线程做排序、过滤大数组、密集循环
+
+## Zustand 订阅粒度
+```typescript
+// ❌ 订阅整个 store，任何字段变化都触发重渲染
+const store = useOrderBookStore()
+
+// ✅ selector 精准订阅
+const bids = useOrderBookStore(s => s.bids)
+const asks = useOrderBookStore(s => s.asks)
+```
+
+## 列表渲染
+- 超过 20 行的列表必须使用 `@tanstack/react-virtual`
+- 行组件必须包裹 `React.memo`，避免父组件更新时无效重渲染
+
+```typescript
+// ✅ 正确：memo + 最小 props
+const OrderBookRow = React.memo(({ price, size, side }: RowProps) => { ... })
+```
+
+## DOM 直写路径（订单簿）
+- 订单簿更新频率 ≈ 5fps，优先通过 ref 直写 DOM，绕过 React reconciliation
+- 仅在数据结构发生变化（档位增减）时才触发 setState
+
+## 刷新节流
+- Worker 内使用 `requestAnimationFrame` 循环，按 `OB_FLUSH_INTERVAL_MS`（200ms）节流
+- 脏位检查：`dirty` 标记为 false 时跳过排序和 postMessage
+
+## 图表更新
+- K线每帧只调用一次 `series.update()`，不在同一帧内多次调用
+- 高频成交（>10条/s）时先在 Worker 缓冲，批量推送给图表

@@ -2,8 +2,8 @@
 
 基于 Next.js 16 (App Router) + TypeScript + shadcn/ui 构建的实时永续合约交易界面，通过 WebSocket 连接 Sonic Market Feed Service (SMFS) 后端，在每秒 20–50 条订单簿更新和 5–20 条成交消息的高频场景下保持 UI 流畅无卡顿。
 
-- **API 文档：** https://interviews-api.sonic.game/docs
-- **OpenAPI 规范：** https://interviews-api.sonic.game/openapi.json
+- **API 文档：** [https://interviews-api.sonic.game/docs](https://interviews-api.sonic.game/docs)
+- **OpenAPI 规范：** [https://interviews-api.sonic.game/openapi.json](https://interviews-api.sonic.game/openapi.json)
 - **支持市场：** BTC-PERP / SOL-PERP（双市场实时切换）
 
 ---
@@ -22,20 +22,24 @@ bun dev
 
 ### 环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NEXT_PUBLIC_API_URL` | `https://interviews-api.sonic.game` | SMFS REST API 地址 |
-| `NEXT_PUBLIC_WS_MARKET_URL` | `wss://interviews-api.sonic.game/ws` | 市场行情 WebSocket |
+
+| 变量                          | 默认值                                         | 说明                   |
+| --------------------------- | ------------------------------------------- | -------------------- |
+| `NEXT_PUBLIC_API_URL`       | `https://interviews-api.sonic.game`         | SMFS REST API 地址     |
+| `NEXT_PUBLIC_WS_MARKET_URL` | `wss://interviews-api.sonic.game/ws`        | 市场行情 WebSocket       |
 | `NEXT_PUBLIC_WS_STREAM_URL` | `wss://interviews-api.sonic.game/ws/stream` | Solana 交易流 WebSocket |
+
 
 ### 可用命令
 
-| 命令 | 说明 |
-|------|------|
-| `bun dev` | 启动开发服务器 (Next.js HMR) |
-| `bun run build` | 生产构建 |
-| `bun start` | 启动生产服务器 |
-| `bun run lint` | ESLint 代码检查 |
+
+| 命令              | 说明                    |
+| --------------- | --------------------- |
+| `bun dev`       | 启动开发服务器 (Next.js HMR) |
+| `bun run build` | 生产构建                  |
+| `bun start`     | 启动生产服务器               |
+| `bun run lint`  | ESLint 代码检查           |
+
 
 ---
 
@@ -43,19 +47,21 @@ bun dev
 
 ### 技术栈
 
-| 类别 | 选型 | 版本 | 选择理由 |
-|------|------|------|----------|
-| 框架 | Next.js (App Router) | 16.2 | Vercel 原生部署零配置，支持 SSR/RSC |
-| 语言 | TypeScript (strict) | ^5 | 全量严格类型，消息体联合类型保证类型安全 |
-| UI 框架 | shadcn/ui + Tailwind CSS | v4 | 可定制、零运行时开销，暗色主题开箱即用 |
-| 状态管理 | Zustand | ^5 | 轻量（<1KB），selector 天然支持细粒度订阅 |
-| 图表 | Lightweight Charts | ^5 | TradingView 金融级 Canvas 图表，GPU 加速 |
-| 虚拟列表 | @tanstack/react-virtual | ^3 | Headless 虚拟化，灵活控制 DOM 结构 |
-| 精度计算 | bignumber.js | ^10 | 消除浮点精度问题（如 70668.9 vs 70668.90000000001） |
-| 事件总线 | mitt | ^3 | 极轻量的类型安全事件发射器，用于模块间解耦通信 |
-| 国际化 | next-intl | ^4 | 基于 cookie 的语言切换（en / zh），Server Component 兼容 |
-| 包管理 | Bun | latest | 安装速度快，CI 构建时间更短 |
-| CI/CD | GitHub Actions + Vercel | - | push/PR 自动触发 lint → build 流水线 |
+
+| 类别    | 选型                       | 版本     | 选择理由                                         |
+| ----- | ------------------------ | ------ | -------------------------------------------- |
+| 框架    | Next.js (App Router)     | 16.2   | Vercel 原生部署零配置，支持 SSR/RSC                    |
+| 语言    | TypeScript (strict)      | ^5     | 全量严格类型，消息体联合类型保证类型安全                         |
+| UI 框架 | shadcn/ui + Tailwind CSS | v4     | 可定制、零运行时开销，暗色主题开箱即用                          |
+| 状态管理  | Zustand                  | ^5     | 轻量（<1KB），selector 天然支持细粒度订阅                  |
+| 图表    | Lightweight Charts       | ^5     | TradingView 金融级 Canvas 图表，GPU 加速             |
+| 虚拟列表  | @tanstack/react-virtual  | ^3     | Headless 虚拟化，灵活控制 DOM 结构                     |
+| 精度计算  | bignumber.js             | ^10    | 消除浮点精度问题（如 70668.9 vs 70668.90000000001）     |
+| 事件总线  | mitt                     | ^3     | 极轻量的类型安全事件发射器，用于模块间解耦通信                      |
+| 国际化   | next-intl                | ^4     | 基于 cookie 的语言切换（en / zh），Server Component 兼容 |
+| 包管理   | Bun                      | latest | 安装速度快，CI 构建时间更短                              |
+| CI/CD | GitHub Actions + Vercel  | -      | push/PR 自动触发 lint → build 流水线                |
+
 
 ### 数据流架构（Worker 模式）
 
@@ -179,12 +185,14 @@ bun dev
 
 4 个独立的 Zustand Store，各自职责清晰，通过 selector 实现细粒度订阅：
 
-| Store | 数据 | 更新频率 | 订阅者 |
-|-------|------|----------|--------|
-| `market-store` | 当前 `marketId` | 极低（用户切换时） | 几乎所有组件（切换时重建整个数据管道） |
-| `order-book-store` | `bids[]`, `asks[]`, `midPrice`, `spreadPercent`, `tickSize` | ~5fps（引擎 rAF 节流） | OrderBook, MarketSelector, OrderEntry |
-| `trade-store` | `trades[]`（最近 200 条）, `displayMode` | 5–20 次/秒 | TradeTape, PriceChart |
-| `connection-store` | `status`, `syncState`, `bookRate`, `tradeRate` | 1 次/秒（速率）+ 状态变化时 | ConnectionStatus, MessageRate, MarketSelector |
+
+| Store              | 数据                                                          | 更新频率             | 订阅者                                           |
+| ------------------ | ----------------------------------------------------------- | ---------------- | --------------------------------------------- |
+| `market-store`     | 当前 `marketId`                                               | 极低（用户切换时）        | 几乎所有组件（切换时重建整个数据管道）                           |
+| `order-book-store` | `bids[]`, `asks[]`, `midPrice`, `spreadPercent`, `tickSize` | ~5fps（引擎 rAF 节流） | OrderBook, MarketSelector, OrderEntry         |
+| `trade-store`      | `trades[]`（最近 200 条）, `displayMode`                         | 5–20 次/秒         | TradeTape, PriceChart                         |
+| `connection-store` | `status`, `syncState`, `bookRate`, `tradeRate`              | 1 次/秒（速率）+ 状态变化时 | ConnectionStatus, MessageRate, MarketSelector |
+
 
 ### Worker 双模式架构
 
@@ -212,17 +220,19 @@ MarketService.switchMarket(marketId)
 
 **通信协议（`worker-messages.ts`）：**
 
-| 方向 | 类型 | 说明 |
-|------|------|------|
-| 主线程 → Worker | `SwitchMarket` | 携带 marketId、tickSize、depth、flushInterval |
-| 主线程 → Worker | `SetTickSize` | 动态修改聚合粒度 |
-| 主线程 → Worker | `SetTradeDisplayMode` | 切换 raw/readable |
-| 主线程 → Worker | `Stop` | 终止所有任务 |
-| Worker → 主线程 | `BookUpdate` | 预计算的 `PriceLevel[]`（bids + asks） |
-| Worker → 主线程 | `TradeUpdate` | 聚合后完整成交列表 |
-| Worker → 主线程 | `ConnectionStatus` | WS 连接状态 |
-| Worker → 主线程 | `SyncState` | 订单簿同步状态 |
-| Worker → 主线程 | `Rates` | 每秒消息吞吐统计 |
+
+| 方向           | 类型                    | 说明                                       |
+| ------------ | --------------------- | ---------------------------------------- |
+| 主线程 → Worker | `SwitchMarket`        | 携带 marketId、tickSize、depth、flushInterval |
+| 主线程 → Worker | `SetTickSize`         | 动态修改聚合粒度                                 |
+| 主线程 → Worker | `SetTradeDisplayMode` | 切换 raw/readable                          |
+| 主线程 → Worker | `Stop`                | 终止所有任务                                   |
+| Worker → 主线程 | `BookUpdate`          | 预计算的 `PriceLevel[]`（bids + asks）         |
+| Worker → 主线程 | `TradeUpdate`         | 聚合后完整成交列表                                |
+| Worker → 主线程 | `ConnectionStatus`    | WS 连接状态                                  |
+| Worker → 主线程 | `SyncState`           | 订单簿同步状态                                  |
+| Worker → 主线程 | `Rates`               | 每秒消息吞吐统计                                 |
+
 
 ### 订单簿同步协议
 
@@ -243,6 +253,7 @@ MarketService.switchMarket(marketId)
 ```
 
 **flush 显示逻辑：**
+
 1. 用 `refPrice` 过滤 bid → 得到 `bestBid`（真实最优买价）
 2. 用 `bestBid` 作为 ask 的边界 → 边界由实际数据决定，不随 EMA 波动
 3. 如 bid 不足 depth，用 `bestAsk` 扩展 bid 边界
@@ -251,6 +262,7 @@ MarketService.switchMarket(marketId)
 **状态机：** `init → syncing → live → resyncing`
 
 **seq 校验逻辑：**
+
 - `msg.seq <= lastSeq` 且差距小 → 正常去重，丢弃
 - `msg.seq <= lastSeq` 且差距大（倒跳） → 服务端 seq 重置，清空锚点 + 快照修正
 - `msg.seq > lastSeq` 且 gap 小（≤ 20） → 容忍并应用
@@ -258,11 +270,13 @@ MarketService.switchMarket(marketId)
 - `lastSeq = -1`（未锚定） → 直接应用
 
 **快照策略：**
+
 - 快照仅在必要时拉取：初始加载 / WS 重连 / 大 seq 缺口 / 服务端 reset
 - 失败后指数退避重试（2s → 4s → 8s → ... → 30s 上限）
 - 超时保护（10s 超时 + 15s isFetching 卡死保护）
 
-**`OrderBookSide` 延迟删除机制：**
+`**OrderBookSide` 延迟删除机制：**
+
 - `size=0` 不立即从 Map 删除，而是加入 `pendingDeletes` 集合
 - 保证边界附近数据稀疏时 `top()` 仍返回足够行数
 - 同价位新数据到来时自动取消待删标记
@@ -371,14 +385,16 @@ MarketService.switchMarket(marketId)
 
 ## 已识别的性能瓶颈
 
-| # | 瓶颈点 | 根因分析 | 当前缓解措施 | 残余风险 |
-|---|--------|----------|-------------|----------|
-| 1 | **Worker postMessage 序列化** | 每次 flush 需将 PriceLevel[] 从 Worker 序列化到主线程 | 数组固定 20 档 × 2 侧，数据量极小（< 1KB） | 极端场景下序列化可能引入微延迟 |
-| 2 | **订单簿排序** | 每次 flush 需对 Map → 过滤 → sort → tick 聚合 → slice | 在 Worker 线程执行，不阻塞 UI；200ms 节流限制频率 | 档位数暴增时排序开销上升 |
-| 3 | **EMA 参考价冷启动** | 首次连接时 refPrice = 0，需等待 delta 到达后才能正确分区 | 冷启动时 `top()` 无 bound 过滤返回全量数据 | 首帧可能短暂显示异常 |
-| 4 | **K线 tick 更新** | 每条 trade 触发 PriceChart re-render + `series.update()` | Lightweight Charts 内部 Canvas 局部重绘，增量更新 | 1s 间隔下成交密集时更新频率高 |
-| 5 | **单市场连接** | 切换市场时销毁 Worker、重建新连接，存在短暂数据断流 | Worker 终止 → 新 Worker 启动 → 快照填充，过渡快速 | 切换瞬间 UI 可能闪烁 |
-| 6 | **延迟删除积累** | `size=0` 条目暂不物理删除，可能在 Map 中积累 | `pendingDeletes > 200` 时批量清除；`trimToMax` 裁剪容量 | 长时间运行后 Map 可能膨胀 |
+
+| #   | 瓶颈点                        | 根因分析                                                 | 当前缓解措施                                        | 残余风险             |
+| --- | -------------------------- | ---------------------------------------------------- | --------------------------------------------- | ---------------- |
+| 1   | **Worker postMessage 序列化** | 每次 flush 需将 PriceLevel[] 从 Worker 序列化到主线程            | 数组固定 20 档 × 2 侧，数据量极小（< 1KB）                  | 极端场景下序列化可能引入微延迟  |
+| 2   | **订单簿排序**                  | 每次 flush 需对 Map → 过滤 → sort → tick 聚合 → slice        | 在 Worker 线程执行，不阻塞 UI；200ms 节流限制频率             | 档位数暴增时排序开销上升     |
+| 3   | **EMA 参考价冷启动**             | 首次连接时 refPrice = 0，需等待 delta 到达后才能正确分区               | 冷启动时 `top()` 无 bound 过滤返回全量数据                 | 首帧可能短暂显示异常       |
+| 4   | **K线 tick 更新**             | 每条 trade 触发 PriceChart re-render + `series.update()` | Lightweight Charts 内部 Canvas 局部重绘，增量更新        | 1s 间隔下成交密集时更新频率高 |
+| 5   | **单市场连接**                  | 切换市场时销毁 Worker、重建新连接，存在短暂数据断流                        | Worker 终止 → 新 Worker 启动 → 快照填充，过渡快速           | 切换瞬间 UI 可能闪烁     |
+| 6   | **延迟删除积累**                 | `size=0` 条目暂不物理删除，可能在 Map 中积累                        | `pendingDeletes > 200` 时批量清除；`trimToMax` 裁剪容量 | 长时间运行后 Map 可能膨胀  |
+
 
 ---
 
@@ -388,26 +404,32 @@ MarketService.switchMarket(marketId)
 
 ### 计算层
 
-| 问题 | 当前方案 | 10x 方案 |
-|------|----------|----------|
-| Worker 单线程瓶颈 | 单 Worker 处理全部计算 | **多 Worker 并行**：拆分订单簿引擎与成交聚合到独立 Worker |
-| 排序 O(N log N) | 全量 Map → sort → slice | 维护**排序跳表**（Skip List）或**堆结构**，取 top-K 为 O(K) |
-| postMessage 开销 | 结构化克隆 PriceLevel[] | **SharedArrayBuffer + Atomics** 共享内存，主线程直接读取 |
+
+| 问题             | 当前方案                  | 10x 方案                                       |
+| -------------- | --------------------- | -------------------------------------------- |
+| Worker 单线程瓶颈   | 单 Worker 处理全部计算       | **多 Worker 并行**：拆分订单簿引擎与成交聚合到独立 Worker       |
+| 排序 O(N log N)  | 全量 Map → sort → slice | 维护**排序跳表**（Skip List）或**堆结构**，取 top-K 为 O(K) |
+| postMessage 开销 | 结构化克隆 PriceLevel[]    | **SharedArrayBuffer + Atomics** 共享内存，主线程直接读取 |
+
 
 ### 渲染层
 
-| 问题 | 当前方案 | 10x 方案 |
-|------|----------|----------|
-| flush 频率 | 200ms / 5fps | 降至 **2fps** 或按需刷新，肉眼无感知 |
-| DOM 直写 | 订单簿高性能直写 | 进一步压缩 DOM 操作，或迁移至 **Canvas 渲染** |
+
+| 问题          | 当前方案                         | 10x 方案                           |
+| ----------- | ---------------------------- | -------------------------------- |
+| flush 频率    | 200ms / 5fps                 | 降至 **2fps** 或按需刷新，肉眼无感知          |
+| DOM 直写      | 订单簿高性能直写                     | 进一步压缩 DOM 操作，或迁移至 **Canvas 渲染**  |
 | K线逐 tick 更新 | 每笔 trade → `series.update()` | 累积 100ms 内的 trades，**批量更新** OHLC |
+
 
 ### 网络层
 
-| 问题 | 当前方案 | 10x 方案 |
-|------|----------|----------|
+
+| 问题        | 当前方案                    | 10x 方案                                                |
+| --------- | ----------------------- | ----------------------------------------------------- |
 | JSON 解析开销 | Worker 内 `JSON.parse()` | 协商服务端启用 **Protocol Buffers / MessagePack**，解析提升 5–10x |
-| 单连接单市场 | 切换时销毁/重建 Worker | **多 Worker 并发**，每个市场独立管道；或单连接 + 服务端多路复用 |
+| 单连接单市场    | 切换时销毁/重建 Worker         | **多 Worker 并发**，每个市场独立管道；或单连接 + 服务端多路复用               |
+
 
 ### 监控与降级
 
@@ -419,19 +441,21 @@ MarketService.switchMarket(marketId)
 
 ## 技术权衡
 
-| 决策 | 选择 A (采纳) | 选择 B (放弃) | 采纳理由 | 代价 |
-|------|--------------|--------------|----------|------|
-| 计算架构 | **Web Worker 优先** | 纯主线程 | 主线程零 delta 运算，UI 永不卡顿；降级模式保底 | Worker 通信有序列化开销，调试略复杂 |
-| 订单簿交叉处理 | **参考价分区 + 零剪枝** | 客户端剪枝 | 不修改 Map 数据 → 数据完整；EMA 分区 → 显示稳定，不闪烁 | 需维护 refPrice 状态；冷启动前首帧可能异常 |
-| 状态管理 | **Zustand** | Redux Toolkit | 包体 <1KB，selector 即订阅粒度，API 极简 | 生态不如 Redux |
-| 图表库 | **Lightweight Charts v5** | ECharts | 金融专用 Canvas 渲染，增量 `update()` API | 定制化需手动实现 |
-| 虚拟列表 | **@tanstack/react-virtual** | react-window | Headless 设计，不侵入 DOM 结构 | 需自行处理容器样式 |
-| 事件通信 | **mitt 事件总线** | 直接回调 / RxJS | 极轻量（<200B），类型安全，模块解耦 | 无背压/缓冲机制 |
-| 精度计算 | **bignumber.js** | 原生 Number | 消除浮点噪声（价格 key 归一化、中间价计算） | 包体 +8KB；热路径改用原生 toFixed 降低 GC |
-| 节流策略 | **requestAnimationFrame** | setInterval | 与浏览器渲染管线同步，Worker 内也可使用 rAF | Worker 中 rAF 行为可能因浏览器而异 |
-| 框架 | **Next.js 16 (App Router)** | Vite SPA | Vercel 零配置部署，内建优化，RSC 减少客户端 JS | 对纯 SPA 场景概念偏重 |
-| 国际化 | **next-intl (cookie-based)** | URL-based i18n | 无需路由重写，切换仅设置 cookie | 不利于 SEO（交易 UI 影响可忽略） |
-| 包管理 | **Bun** | pnpm / npm | 安装快，CI 时间短 | 少数 npm 兼容性问题 |
+
+| 决策      | 选择 A (采纳)                    | 选择 B (放弃)      | 采纳理由                                | 代价                            |
+| ------- | ---------------------------- | -------------- | ----------------------------------- | ----------------------------- |
+| 计算架构    | **Web Worker 优先**            | 纯主线程           | 主线程零 delta 运算，UI 永不卡顿；降级模式保底        | Worker 通信有序列化开销，调试略复杂         |
+| 订单簿交叉处理 | **参考价分区 + 零剪枝**              | 客户端剪枝          | 不修改 Map 数据 → 数据完整；EMA 分区 → 显示稳定，不闪烁 | 需维护 refPrice 状态；冷启动前首帧可能异常    |
+| 状态管理    | **Zustand**                  | Redux Toolkit  | 包体 <1KB，selector 即订阅粒度，API 极简       | 生态不如 Redux                    |
+| 图表库     | **Lightweight Charts v5**    | ECharts        | 金融专用 Canvas 渲染，增量 `update()` API    | 定制化需手动实现                      |
+| 虚拟列表    | **@tanstack/react-virtual**  | react-window   | Headless 设计，不侵入 DOM 结构              | 需自行处理容器样式                     |
+| 事件通信    | **mitt 事件总线**                | 直接回调 / RxJS    | 极轻量（<200B），类型安全，模块解耦                | 无背压/缓冲机制                      |
+| 精度计算    | **bignumber.js**             | 原生 Number      | 消除浮点噪声（价格 key 归一化、中间价计算）            | 包体 +8KB；热路径改用原生 toFixed 降低 GC |
+| 节流策略    | **requestAnimationFrame**    | setInterval    | 与浏览器渲染管线同步，Worker 内也可使用 rAF         | Worker 中 rAF 行为可能因浏览器而异       |
+| 框架      | **Next.js 16 (App Router)**  | Vite SPA       | Vercel 零配置部署，内建优化，RSC 减少客户端 JS      | 对纯 SPA 场景概念偏重                 |
+| 国际化     | **next-intl (cookie-based)** | URL-based i18n | 无需路由重写，切换仅设置 cookie                 | 不利于 SEO（交易 UI 影响可忽略）          |
+| 包管理     | **Bun**                      | pnpm / npm     | 安装快，CI 时间短                          | 少数 npm 兼容性问题                  |
+
 
 ---
 
@@ -439,19 +463,19 @@ MarketService.switchMarket(marketId)
 
 ### 核心功能
 
-- [x] **市场选择器** — 悬停下拉切换 BTC-PERP / SOL-PERP，实时显示中间价、价差、成交速率
-- [x] **订单簿** — 参考价分区的买卖盘（高性能 DOM 直写 + 双层深度条），tick 聚合粒度可调
-- [x] **成交流** — 虚拟化列表，raw / readable 双模式，新成交闪烁动画
-- [x] **下单面板** — 限价 / 市价切换，买入（做多）/ 卖出（做空），BigNumber 精度验证
-- [x] **K 线图** — Lightweight Charts，4 个时间间隔（1s / 1m / 5m / 15m），实时 tick 更新
-- [x] **连接状态** — 绿色（已连接）/ 黄色（同步中 / 重连中）/ 红色（已断开）
-- [x] **消息速率** — 实时显示每秒 WebSocket 消息数（book + trade）
-- [x] **国际化** — 英文 / 中文切换（cookie-based）
+- **市场选择器** — 悬停下拉切换 BTC-PERP / SOL-PERP，实时显示中间价、价差、成交速率
+- **订单簿** — 参考价分区的买卖盘（高性能 DOM 直写 + 双层深度条），tick 聚合粒度可调
+- **成交流** — 虚拟化列表，raw / readable 双模式，新成交闪烁动画
+- **下单面板** — 限价 / 市价切换，买入（做多）/ 卖出（做空），BigNumber 精度验证
+- **K 线图** — Lightweight Charts，4 个时间间隔（1s / 1m / 5m / 15m），实时 tick 更新
+- **连接状态** — 绿色（已连接）/ 黄色（同步中 / 重连中）/ 红色（已断开）
+- **消息速率** — 实时显示每秒 WebSocket 消息数（book + trade）
+- **国际化** — 英文 / 中文切换（cookie-based）
 
 ### 加分项
 
-- [x] **Web Worker 离线计算** — WS + 引擎 + 聚合在 Worker 线程，主线程零计算
-- [x] **Solana 交易流面板** — 连接 `/ws/stream`，展示实时链上交易
+- **Web Worker 离线计算** — WS + 引擎 + 聚合在 Worker 线程，主线程零计算
+- **Solana 交易流面板** — 连接 `/ws/stream`，展示实时链上交易
   - 交易签名（点击跳转 Sonic Explorer）
   - Slot 编号、手续费（lamports → SOL）、程序数量
   - 处理 `reorg` 事件（移除回滚 slot 之后的交易）

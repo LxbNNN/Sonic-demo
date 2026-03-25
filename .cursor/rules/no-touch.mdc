@@ -1,0 +1,37 @@
+---
+description: 核心文件保护：这些文件涉及通信协议或核心算法，修改前必须在对话中说明原因
+alwaysApply: true
+---
+
+# 核心文件保护
+
+以下文件**禁止在未说明原因的情况下修改**。如需改动，先在对话里解释改动原因和影响范围，由开发者确认后再执行。
+
+## 通信协议
+- `lib/worker-messages.ts` — Worker ↔ 主线程消息协议
+  - 新增消息类型必须同时更新发送方和接收方
+  - 字段重命名会导致主线程解包静默失败
+
+## 订单簿核心算法
+- `lib/order-book-engine.ts` — EMA 参考价分区 + rAF 节流 flush
+  - EMA alpha 参数（0.03）已经过调优，不要随意修改
+  - `flush()` 方法的分区逻辑直接影响 bid/ask 不交叉保证
+- `lib/order-book-side.ts` — 延迟删除机制（`pendingDeletes`）
+  - 不要改成立即删除，边界档位稀疏时会导致列表闪烁
+
+## WebSocket 生命周期
+- `lib/websocket-manager.ts` — 重连退避 + 心跳 + 网络事件
+  - 退避参数（1s 起步，30s 上限）经过实测
+  - ping/pong 超时（10s）不要随意调整
+
+## 枚举与常量
+- `lib/enums.ts` — WorkerCmd / WorkerEvent 枚举值
+- `lib/constants.ts` — 配置常量（心跳间隔、深度、seq 容忍阈值）
+  - 常量变更影响 Worker 和主线程双侧，必须同步
+
+## 允许的安全修改
+不需要说明原因即可修改：
+- `messages/en.json` / `messages/zh.json`（仅新增翻译 key）
+- `lib/format.ts`（新增格式化工具函数）
+- `lib/utils.ts`（新增通用工具函数）
+- `components/ui/`（shadcn/ui 基础组件样式微调）
